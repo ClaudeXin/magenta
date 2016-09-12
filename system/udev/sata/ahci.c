@@ -52,6 +52,7 @@
 
 #define AHCI_PORT_FLAG_IMPLEMENTED (1 << 0)
 #define AHCI_PORT_FLAG_PRESENT     (1 << 1)
+#define AHCI_PORT_FLAG_SYNC_PAUSED (1 << 2) // port is paused until pending xfers are done
 
 typedef struct ahci_port {
     int nr; // 0-based
@@ -62,10 +63,11 @@ typedef struct ahci_port {
     ahci_fis_t* fis;
     ahci_ct_t* ct[AHCI_MAX_COMMANDS];
 
+    mtx_t lock;
+
     uint32_t running; // bitmask of running commands
     iotxn_t* commands[AHCI_MAX_COMMANDS]; // commands in flight
 
-    mtx_t lock; // protects txn_list
     list_node_t txn_list;
 } ahci_port_t;
 
@@ -179,7 +181,7 @@ static void ahci_port_reset(ahci_port_t* port) {
 }
 
 static bool ahci_port_cmd_busy(ahci_port_t* port, int slot) {
-    return ((ahci_read(&port->regs->sact) | ahci_read(&port->regs->ci)) & slot) || (port->commands[slot] != NULL);
+    return ((ahci_read(&port->regs->sact) | ahci_read(&port->regs->ci)) & (1 << slot)) || (port->commands[slot] != NULL) || (port->running & (1 << slot));
 }
 
 static bool cmd_is_write(uint8_t cmd) {
@@ -289,10 +291,15 @@ static void ahci_port_complete_txn(ahci_device_t* dev, ahci_port_t* port, mx_sta
             continue;
         }
         if (!(sact & (1 << i))) {
-            // clear state before calling the complete() hook
             mtx_lock(&port->lock);
+            // clear state before calling the complete() hook
             port->running &= ~(1 << i);
             port->commands[i] = NULL;
+
+            // resume the port if paused for sync
+            if ((port->flags & AHCI_PORT_FLAG_SYNC_PAUSED) && !port->running) {
+                port->flags &= ~AHCI_PORT_FLAG_SYNC_PAUSED;
+            }
             mtx_unlock(&port->lock);
 
             txn->ops->complete(txn, status, txn->length);
@@ -425,11 +432,23 @@ static int ahci_worker_thread(void* arg) {
         // iterate all the ports and run commands
         for (int i = 0; i < AHCI_MAX_PORTS; i++) {
             port = &dev->ports[i];
-            if (!(port->flags & (AHCI_PORT_FLAG_IMPLEMENTED | AHCI_PORT_FLAG_PRESENT))) continue;
+            if (!(port->flags & (AHCI_PORT_FLAG_IMPLEMENTED | AHCI_PORT_FLAG_PRESENT))) {
+                continue;
+            }
+            if (port->flags & AHCI_PORT_FLAG_SYNC_PAUSED) {
+                continue;
+            }
 
             mtx_lock(&port->lock);
             txn = list_peek_head_type(&port->txn_list, iotxn_t, node);
             if (!txn) {
+                mtx_unlock(&port->lock);
+                continue;
+            }
+
+            // if IOTXN_SYNC_BEFORE, pause the port if there are transactions in flight
+            if ((txn->flags & IOTXN_SYNC_BEFORE) && port->running) {
+                port->flags |= AHCI_PORT_FLAG_SYNC_PAUSED;
                 mtx_unlock(&port->lock);
                 continue;
             }
@@ -446,8 +465,13 @@ static int ahci_worker_thread(void* arg) {
                 continue;
             }
 
-            // run the command
             list_delete(&txn->node);
+            // if IOTXN_SYNC_AFTER, pause the port until this command is complete
+            if (txn->flags & IOTXN_SYNC_AFTER) {
+                port->flags |= AHCI_PORT_FLAG_SYNC_PAUSED;
+                continue;
+            }
+            // run the command
             ahci_do_txn(dev, port, i, txn);
             mtx_unlock(&port->lock);
         }
