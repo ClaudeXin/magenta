@@ -38,7 +38,6 @@ typedef struct sata_pdata {
     uint16_t count; // in blocks
     uint8_t cmd;
     uint8_t device;
-    int max_cmd;
     int port;
 } sata_pdata_t;
 

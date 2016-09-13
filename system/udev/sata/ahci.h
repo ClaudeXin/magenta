@@ -158,4 +158,5 @@ static_assert(sizeof(ahci_fis_t) == 0x100, "unexpected fis size");
 static_assert(sizeof(ahci_ct_t) == 0x80, "unexpected command table header size");
 static_assert(sizeof(ahci_prd_t) == 0x10, "unexpected prd entry size");
 
+void ahci_port_set_max_cmd(mx_device_t* dev, int port, int max);
 void ahci_iotxn_queue(mx_device_t* dev, iotxn_t* txn);

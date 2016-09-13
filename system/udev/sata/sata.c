@@ -40,7 +40,6 @@ typedef struct sata_device {
 
     int port;
     int flags;
-    int max_cmd; // inclusive
 
     mx_size_t sector_sz;
     mx_off_t capacity; // bytes
@@ -66,7 +65,6 @@ static mx_status_t sata_device_identify(sata_device_t* dev, mx_device_t* control
     sata_pdata_t* pdata = sata_iotxn_pdata(txn);
     pdata->cmd = SATA_CMD_IDENTIFY_DEVICE;
     pdata->device = 0;
-    pdata->max_cmd = dev->max_cmd;
     pdata->port = dev->port;
     txn->protocol = MX_PROTOCOL_SATA;
     txn->complete_cb = sata_device_identify_complete;
@@ -125,8 +123,9 @@ static mx_status_t sata_device_identify(sata_device_t* dev, mx_device_t* control
     } else {
         xprintf(" PIO");
     }
-    dev->max_cmd = *(devinfo + SATA_DEVINFO_QUEUE_DEPTH);
-    xprintf(" %d commands\n", dev->max_cmd + 1);
+    int max_cmd = *(devinfo + SATA_DEVINFO_QUEUE_DEPTH);
+    ahci_port_set_max_cmd(controller, dev->port, max_cmd);
+    xprintf(" %d commands\n", max_cmd + 1);
     if (cap & (1 << 9)) {
         dev->sector_sz = 512; // default
         if ((*(devinfo + SATA_DEVINFO_SECTOR_SIZE) & 0xd000) == 0x5000) {
@@ -196,7 +195,6 @@ static void sata_iotxn_queue(mx_device_t* dev, iotxn_t* txn) {
     pdata->device = 0x40;
     pdata->lba = txn->offset / device->sector_sz;
     pdata->count = txn->length / device->sector_sz;
-    pdata->max_cmd = device->max_cmd;
     pdata->port = device->port;
 
     ahci_iotxn_queue(dev->parent, txn);
